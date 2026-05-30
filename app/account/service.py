@@ -1,10 +1,11 @@
 import logging
 from datetime import datetime, timezone
-from sqlalchemy import select
+from decimal import Decimal
+from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.account.models import Account, AccountSnapshot
+from app.account.models import Account, AccountSnapshot, Position
 from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
@@ -61,9 +62,9 @@ async def get_account_summary(account_hash: str, db: AsyncSession) -> AccountSna
     current = securities.get("currentBalances", {})
     initial = securities.get("initialBalances", {})
 
-    day_pnl = _safe_decimal(current.get("totalMarketValue")) and (
-        _safe_decimal(current.get("totalMarketValue")) - _safe_decimal(initial.get("totalMarketValue"))
-    )
+    current_mv = _safe_decimal(current.get("totalMarketValue"))
+    initial_mv = _safe_decimal(initial.get("totalMarketValue"))
+    day_pnl = (current_mv - initial_mv) if current_mv is not None and initial_mv is not None else None
 
     snapshot = AccountSnapshot(
         account_hash=account_hash,
@@ -93,8 +94,57 @@ async def get_latest_snapshot(account_hash: str, db: AsyncSession) -> AccountSna
     return result.scalar_one_or_none()
 
 
-def _safe_decimal(value):
-    from decimal import Decimal
+async def sync_positions(account_hash: str, db: AsyncSession) -> list[Position]:
+    client = get_schwab_client()
+    response = client.account_details(account_hash, fields="positions")
+    response.raise_for_status()
+    data = response.json()
+
+    raw_positions = data.get("securitiesAccount", {}).get("positions", [])
+
+    await db.execute(delete(Position).where(Position.account_hash == account_hash))
+
+    positions = []
+    for pos in raw_positions:
+        instrument = pos.get("instrument", {})
+        market_value = _safe_decimal(pos.get("marketValue"))
+        avg_price = _safe_decimal(pos.get("averagePrice"))
+        quantity = _safe_decimal(pos.get("longQuantity", 0)) - _safe_decimal(pos.get("shortQuantity", 0))
+        cost_basis = _safe_decimal(pos.get("averageLongPrice") or pos.get("averagePrice"))
+        unrealized_pnl = (
+            (market_value - (quantity * cost_basis))
+            if market_value is not None and quantity is not None and cost_basis is not None
+            else _safe_decimal(pos.get("currentDayProfitLoss"))
+        )
+
+        position = Position(
+            account_hash=account_hash,
+            symbol=instrument.get("symbol", ""),
+            cusip=instrument.get("cusip"),
+            asset_type=instrument.get("assetType"),
+            quantity=quantity or Decimal("0"),
+            average_price=avg_price,
+            current_value=market_value,
+            unrealized_pnl=unrealized_pnl,
+            raw=pos,
+            refreshed_at=datetime.now(timezone.utc),
+        )
+        db.add(position)
+        positions.append(position)
+
+    await db.commit()
+    logger.info("Synced %d position(s) for account %s", len(positions), account_hash)
+    return positions
+
+
+async def list_positions(account_hash: str, db: AsyncSession) -> list[Position]:
+    result = await db.execute(
+        select(Position).where(Position.account_hash == account_hash)
+    )
+    return list(result.scalars().all())
+
+
+def _safe_decimal(value) -> Decimal | None:
     try:
         return Decimal(str(value)) if value is not None else None
     except Exception:
