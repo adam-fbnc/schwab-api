@@ -25,3 +25,18 @@ class AccountSummaryResponse(BaseModel):
     snapshot_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PositionResponse(BaseModel):
+    id: int
+    account_hash: str
+    symbol: str
+    cusip: str | None
+    asset_type: str | None
+    quantity: Decimal
+    average_price: Decimal | None
+    current_value: Decimal | None
+    unrealized_pnl: Decimal | None
+    refreshed_at: datetime
+
+    model_config = {"from_attributes": True}

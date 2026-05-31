@@ -19,15 +19,29 @@ async def sync_accounts(db: AsyncSession = Depends(get_db)):
 
 @router.get("/{account_hash}/summary", response_model=schemas.AccountSummaryResponse)
 async def get_account_summary(account_hash: str, db: AsyncSession = Depends(get_db)):
-    accounts = await service.list_accounts(db)
-    if not any(a.account_hash == account_hash for a in accounts):
-        raise HTTPException(status_code=404, detail="Account not found")
+    await _assert_account_exists(account_hash, db)
     return await service.get_account_summary(account_hash, db)
 
 
 @router.post("/{account_hash}/summary/refresh", response_model=schemas.AccountSummaryResponse)
 async def refresh_account_summary(account_hash: str, db: AsyncSession = Depends(get_db)):
+    await _assert_account_exists(account_hash, db)
+    return await service.get_account_summary(account_hash, db)
+
+
+@router.get("/{account_hash}/positions", response_model=list[schemas.PositionResponse])
+async def get_positions(account_hash: str, db: AsyncSession = Depends(get_db)):
+    await _assert_account_exists(account_hash, db)
+    return await service.list_positions(account_hash, db)
+
+
+@router.post("/{account_hash}/positions/sync", response_model=list[schemas.PositionResponse])
+async def sync_positions(account_hash: str, db: AsyncSession = Depends(get_db)):
+    await _assert_account_exists(account_hash, db)
+    return await service.sync_positions(account_hash, db)
+
+
+async def _assert_account_exists(account_hash: str, db: AsyncSession) -> None:
     accounts = await service.list_accounts(db)
     if not any(a.account_hash == account_hash for a in accounts):
         raise HTTPException(status_code=404, detail="Account not found")
-    return await service.get_account_summary(account_hash, db)
